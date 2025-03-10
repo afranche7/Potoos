@@ -5,8 +5,12 @@ setup(
     version='0.1',
     packages=find_packages(),
     install_requires=[
-        'redis',
-        'luminol'
+        'async-timeout == 5.0.1',
+         'future == 0.16.0',
+         'luminol == 0.4',
+         'numpy == 2.2.3',
+         'redis == 5.2.1',
+         'scipy == 1.15.2'
     ],
     tests_require=[
         'unittest'
@@ -23,4 +27,5 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Operating System :: OS Independent',
     ],
+    python_requires=">=3.10",
 )

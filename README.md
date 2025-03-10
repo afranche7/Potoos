@@ -17,4 +17,4 @@ anomalies = detector.detect_anomalies(time_series_data)
 for timestamp, score in anomalies.items():
     print(f"Anomaly detected at {timestamp}: Score = {score}")
 
-```
+```clau
