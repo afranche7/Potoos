@@ -1,9 +1,8 @@
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/5fdf1783-27dd-407e-bba6-bb1c809c689c" width="250" height="250">
+</p>
+
 # Potoos
-
-<div style="text-align: center;">
-  <img src="https://github.com/user-attachments/assets/00a1640c-5f44-4098-8aad-ff89a1b4455f" width="250" height="250">
-</div>
-
 Lightweight anomaly detection on redis time series data based on Luminol
 
 ## How to use
