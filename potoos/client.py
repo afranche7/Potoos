@@ -1,31 +1,110 @@
 import time
-from typing import List, Tuple, Dict, Any
-from dataclasses import dataclass
 from redis.client import Redis
 from luminol.anomaly_detector import AnomalyDetector
 from luminol.modules.time_series import TimeSeries
-
-
-@dataclass
-class DataPoint:
-    """Class representing a time series data point."""
-    timestamp: int # Unix timestamp in milliseconds
-    value: float
-
-
-@dataclass
-class AnomalyResult:
-    """Class representing an anomaly detection result."""
-    timestamp: int  # Unix timestamp in milliseconds
-    value: float | int
-    anomaly_score: float
-    is_anomaly: bool
-
+from typing import List, Tuple, Dict, Any, Optional, Union, Callable
+from .models.config import TimeSeriesConfig, AnomalyDetectionConfig
+from .models.anomaly import DataPoint, AnomalyResult
 
 
 class PotoosClient:
-    def __init__(self, redis_client: Redis):
+    def __init__(
+            self,
+            redis_client: Redis,
+            default_ts_config: Optional[TimeSeriesConfig] = None,
+            default_anomaly_config: Optional[AnomalyDetectionConfig] = None
+    ):
         self.redis_client: Redis = redis_client
+        self.default_ts_config = default_ts_config or TimeSeriesConfig()
+        self.default_anomaly_config = default_anomaly_config or AnomalyDetectionConfig()
+        self.check_time_series_module()
+
+    def check_time_series_module(self):
+        """
+        Verifies that the RedisTimeSeries module is loaded on the Redis server.
+        Raises an exception if the module is not available.
+        """
+        modules = self.redis_client.module_list()
+
+        has_time_series = any(m.get('name') == 'timeseries' for m in modules)
+
+        if not has_time_series:
+            raise ModuleNotFoundError(
+                "RedisTimeSeries module is not loaded on the Redis server. "
+                "Please load the module before using time series functionality."
+            )
+
+    def monitor(
+            self,
+            key: bytes | str | memoryview,
+            ts_config: Optional[TimeSeriesConfig] = None,
+            anomaly_config: Optional[AnomalyDetectionConfig] = None,
+            callback: Optional[Callable[[List[AnomalyResult], Dict[str, Any]], None]] = None
+    ) -> Tuple[List[AnomalyResult], Dict[str, Any]]:
+        """
+        Monitors a time series key by fetching data and performing anomaly detection.
+
+        Args:
+            key: The Redis time series key to monitor
+            ts_config: Configuration for time series data retrieval
+            anomaly_config: Configuration for anomaly detection
+            callback: Optional callback function that receives anomaly results
+
+        Returns:
+            Tuple containing:
+                - List of AnomalyResult objects
+                - Dictionary with metadata about the detection process
+        """
+        ts_config = ts_config or self.default_ts_config
+        anomaly_config = anomaly_config or self.default_anomaly_config
+
+        data_points: List[DataPoint] = self.get_time_series(key, config=ts_config)
+
+        if not data_points:
+            return [], {'error': 'No data points retrieved'}
+
+        results = None
+        metadata = None
+
+        if anomaly_config.use_multiple_algorithms:
+            algorithm_results = self.detect_anomalies_multiple_algorithms(
+                data_points=data_points,
+                config=anomaly_config
+            )
+
+            primary_algorithm = anomaly_config.algorithm
+            if primary_algorithm in algorithm_results:
+                results, metadata = algorithm_results[primary_algorithm]
+            else:
+                first_algo = next(iter(algorithm_results))
+                results, metadata = algorithm_results[first_algo]
+
+            if metadata:
+                metadata['multi_algorithm_results'] = algorithm_results
+
+        elif anomaly_config.use_stream_detection:
+            results = self.detect_and_analyze_stream(
+                data_points=data_points,
+                config=anomaly_config
+            )
+            metadata = {
+                'detection_method': 'stream',
+                'window_size': anomaly_config.window_size,
+                'step_size': anomaly_config.step_size,
+                'algorithm': anomaly_config.algorithm,
+                'threshold': anomaly_config.threshold,
+                'data_points': len(data_points)
+            }
+        else:
+            results, metadata = self.detect_anomalies(
+                data_points=data_points,
+                config=anomaly_config
+            )
+
+        if callback and results is not None and metadata is not None:
+            callback(results, metadata)
+
+        return results, metadata
 
     def get_last_n_points(self, key: bytes | str | memoryview, n: int) -> List[DataPoint]:
         """
@@ -52,12 +131,13 @@ class PotoosClient:
     def get_latest_from_time_series(
             self,
             key: bytes | str | memoryview,
-            count: int,
-            start_time: int | str | None= None,
-            end_time: int | str | None = None,
-            aggregation_type: str | None = None,
-            time_bucket: int | None = None,
-            reverse_chronological: bool = False
+            count: Optional[int] = None,
+            start_time: Optional[Union[int, str]] = None,
+            end_time: Optional[Union[int, str]] = None,
+            aggregation_type: Optional[str] = None,
+            time_bucket: Optional[int] = None,
+            reverse_chronological: Optional[bool] = None,
+            config: Optional[TimeSeriesConfig] = None
     ) -> List[DataPoint]:
         """
         Fetch the latest N points from a Redis time series within a specified time range.
@@ -73,61 +153,76 @@ class PotoosClient:
             time_bucket: Time bucket size in milliseconds for aggregation
             reverse_chronological: If True, return points newest to oldest
                                   If False, return points oldest to newest (chronological)
+            config: TimeSeriesConfig object to use. If provided, its values override individual params.
 
         Returns:
             List of DataPoint objects containing timestamps and values
         """
-        # Set default time range if not specified
-        if start_time is None:
-            start_time = '-'  # Redis special value for earliest point
+        ts_config = config or self.default_ts_config
 
-        if end_time is None:
-            end_time = int(time.time() * 1000)  # Current time in milliseconds
+        actual_count = count if count is not None else ts_config.count
+        actual_start_time = start_time if start_time is not None else ts_config.start_time
+        actual_end_time = end_time if end_time is not None else ts_config.end_time
+        actual_aggregation_type = aggregation_type if aggregation_type is not None else ts_config.aggregation_type
+        actual_time_bucket = time_bucket if time_bucket is not None else ts_config.time_bucket
+        actual_reverse = reverse_chronological if reverse_chronological is not None else ts_config.reverse_chronological
 
-        # Use revrange to get newest points first, for efficiency
+        if actual_start_time is None:
+            actual_start_time = '-'  # Redis special value for earliest point
+
+        if actual_end_time is None:
+            actual_end_time = int(time.time() * 1000)  # Current time in milliseconds
+
         timestamps, values = self.redis_client.ts().revrange(
             key=key,
-            from_time=start_time,
-            to_time=end_time,
-            count=count,
-            aggregation_type=aggregation_type,
-            bucket_size_msec=time_bucket
+            from_time=actual_start_time,
+            to_time=actual_end_time,
+            count=actual_count,
+            aggregation_type=actual_aggregation_type,
+            bucket_size_msec=actual_time_bucket
         )
 
-        # Create DataPoint objects from the results
         data_points = [
             DataPoint(timestamp=ts, value=val)
             for ts, val in zip(timestamps, values)
         ]
 
-        # If chronological order is requested, reverse the list
-        if not reverse_chronological:
+        if not actual_reverse:
             data_points.reverse()
 
         return data_points
 
-    def get_time_series(self, key: bytes | str | memoryview,
-                        aggregation_type: str | None = None,
-                        time_bucket: int | None = None,
-                        start_time: int | str = '-',
-                        end_time: int | str = '+',
-                        count: int | None = 100) -> List[DataPoint]:
+    def get_time_series(
+            self,
+            key: bytes | str | memoryview,
+            config: Optional[TimeSeriesConfig] = None,
+            **kwargs
+    ) -> List[DataPoint]:
         """
         Fetch time series data from Redis with enhanced query options.
 
         Args:
             key: The Redis time series key
-            aggregation_type: Type of aggregation ('avg', 'sum', 'min', 'max', etc.)
-            time_bucket: Time bucket size in seconds for aggregation
-            start_time: Start time in Unix milliseconds (None means '-' or earliest)
-            end_time: End time in Unix milliseconds (None means '+' or latest)
-            count: Maximum number of data points to return
+            config: TimeSeriesConfig object to use
+            **kwargs: Optional arguments that override config values
 
         Returns:
             List of timestamps to values
         """
+        # Determine which config to use, allowing override from kwargs
+        ts_config = config or self.default_ts_config
+
+        # Extract values from config
+        aggregation_type = kwargs.get('aggregation_type', ts_config.aggregation_type)
+        time_bucket = kwargs.get('time_bucket', ts_config.time_bucket)
+        start_time = kwargs.get('start_time', ts_config.start_time)
+        end_time = kwargs.get('end_time', ts_config.end_time)
+        count = kwargs.get('count', ts_config.count)
+
         timestamps, values = self.redis_client.ts().range(
-            key=key, from_time=start_time, to_time=end_time,
+            key=key,
+            from_time=start_time,
+            to_time=end_time,
             aggregation_type=aggregation_type,
             time_bucket=time_bucket,
             count=count
@@ -142,30 +237,30 @@ class PotoosClient:
     def detect_anomalies(
             self,
             data_points: List[DataPoint],
-            threshold: float = 0.8,
-            algorithm: str = 'derivative',
-            max_score: float | None = None
+            config: Optional[AnomalyDetectionConfig] = None,
+            **kwargs
     ) -> Tuple[List[AnomalyResult], Dict[str, Any]]:
         """
         Detect anomalies in a list of DataPoint objects using Luminol.
 
         Args:
             data_points: List of DataPoint objects containing timestamp and value
-            threshold: Anomaly score threshold (0.0 to 1.0). Points with scores above
-                       this threshold are considered anomalies
-            algorithm: Anomaly detection algorithm to use. Options include:
-                      'derivative' - Based on first and second derivatives (best for trends)
-                      'exp_avg_detector' - Based on exponential moving averages
-                      'bitmap_detector' - Pattern-based detector using SAX discretization
-                      'default_detector' - Ensemble of the above methods
-            max_score: Optional maximum score to normalize anomaly scores
-                       If None, will use the maximum score detected
+            config: AnomalyDetectionConfig object to use
+            **kwargs: Optional arguments that override config values
 
         Returns:
             Tuple containing:
               - List of AnomalyResult objects with anomaly scores and classification
               - Dictionary with metadata about the detection process
         """
+        # Determine which config to use
+        anomaly_config = config or self.default_anomaly_config
+
+        # Extract values from config, allowing override from kwargs
+        threshold = kwargs.get('threshold', anomaly_config.threshold)
+        algorithm = kwargs.get('algorithm', anomaly_config.algorithm)
+        max_score = kwargs.get('max_score', anomaly_config.max_score)
+
         if len(data_points) < 4:
             raise ValueError("Not enough data points for anomaly detection (minimum 4 required)")
 
@@ -234,21 +329,27 @@ class PotoosClient:
     def detect_anomalies_multiple_algorithms(
             self,
             data_points: List[DataPoint],
-            threshold: float = 0.8,
-            algorithms: List[str] | None = None
+            config: Optional[AnomalyDetectionConfig] = None,
+            **kwargs
     ) -> Dict[str, Tuple[List[AnomalyResult], Dict]]:
         """
         Run anomaly detection with multiple algorithms and compare results.
 
         Args:
             data_points: List of DataPoint objects
-            threshold: Anomaly score threshold
-            algorithms: List of algorithm names to use
-                       If None, uses all available algorithms
+            config: AnomalyDetectionConfig object to use
+            **kwargs: Optional arguments that override config values
 
         Returns:
             Dictionary mapping algorithm names to their results and metadata
         """
+        # Determine which config to use
+        anomaly_config = config or self.default_anomaly_config
+
+        # Extract values from config, allowing override from kwargs
+        threshold = kwargs.get('threshold', anomaly_config.threshold)
+        algorithms = kwargs.get('algorithms', anomaly_config.algorithms)
+
         if algorithms is None:
             algorithms = ['derivative', 'exp_avg_detector', 'bitmap_detector', 'default_detector']
 
@@ -269,10 +370,8 @@ class PotoosClient:
     def detect_and_analyze_stream(
             self,
             data_points: List[DataPoint],
-            window_size: int = 100,
-            threshold: float = 0.8,
-            algorithm: str = 'derivative',
-            step_size: int = 10
+            config: Optional[AnomalyDetectionConfig] = None,
+            **kwargs
     ) -> List[AnomalyResult]:
         """
         Detect anomalies in a sliding window over a stream of data points.
@@ -281,23 +380,30 @@ class PotoosClient:
 
         Args:
             data_points: List of DataPoint objects
-            window_size: Number of points to include in each analysis window
-            threshold: Anomaly score threshold
-            algorithm: Detection algorithm to use
-            step_size: Number of points to slide the window each time
+            config: AnomalyDetectionConfig object to use
+            **kwargs: Optional arguments that override config values
 
         Returns:
             List of AnomalyResult objects for the entire dataset
         """
+        # Determine which config to use
+        anomaly_config = config or self.default_anomaly_config
+
+        # Extract values from config, allowing override from kwargs
+        window_size = kwargs.get('window_size', anomaly_config.window_size)
+        threshold = kwargs.get('threshold', anomaly_config.threshold)
+        algorithm = kwargs.get('algorithm', anomaly_config.algorithm)
+        step_size = kwargs.get('step_size', anomaly_config.step_size)
+
         if len(data_points) < window_size:
-            results, _ = self.detect_anomalies(data_points, threshold, algorithm)
+            results, _ = self.detect_anomalies(data_points, threshold=threshold, algorithm=algorithm)
             return results
 
         all_results = []
 
         for i in range(0, len(data_points) - window_size + 1, step_size):
             window = data_points[i:i + window_size]
-            window_results, _ = self.detect_anomalies(window, threshold, algorithm)
+            window_results, _ = self.detect_anomalies(window, threshold=threshold, algorithm=algorithm)
 
             if i + step_size < len(data_points) - window_size + 1:
                 window_results = window_results[:step_size]
