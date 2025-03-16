@@ -9,8 +9,8 @@ Potoos is a lightweight Python library for time series anomaly detection using R
 ## Overview
 
 Potoos combines the power of:
-- **Redis Time Series** for efficient time series data storage and retrieval
-- **Luminol** for robust anomaly detection algorithms
+- **[Redis Time Series](https://github.com/RedisTimeSeries/RedisTimeSeries)** for efficient time series data storage and retrieval
+- **[Luminol](https://github.com/linkedin/luminol)** for robust anomaly detection algorithms
 
 This makes it ideal for monitoring metrics, detecting unusual patterns, and identifying outliers in your time series data.
 
