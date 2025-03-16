@@ -3,54 +3,127 @@
 </p>
 
 # Potoos
-Lightweight anomaly detection on redis time series data based on Luminol
 
-## How to use
+Potoos is a lightweight Python library for time series anomaly detection using Redis Time Series and Luminol. Monitor your time series data for anomalies with minimal configuration.
+
+## Overview
+
+Potoos combines the power of:
+- **Redis Time Series** for efficient time series data storage and retrieval
+- **Luminol** for robust anomaly detection algorithms
+
+This makes it ideal for monitoring metrics, detecting unusual patterns, and identifying outliers in your time series data.
+
+## Features
+
+- 🔄 **Seamless Redis TimeSeries Integration**: Automatically verifies Redis module availability
+- 🔍 **Configurable Time Series Retrieval**: Forward or reverse order, with flexible query options
+- 🚨 **Anomaly Detection**: Uses Luminol's advanced algorithms to identify anomalies
+- 🛠️ **Highly Configurable**: Customize both time series retrieval and anomaly detection parameters
+
+## Requirements
+
+- Python 3.10+
+- Redis server with the RedisTimeSeries module installed
+- Dependencies:
+  - redis-py
+  - luminol
+
+## Installation (Soon !)
+
+```bash
+pip install potoos
+```
+
+Ensure your Redis server has the TimeSeries module installed:
+
+```bash
+# Check if module is installed
+redis-cli MODULE LIST | grep timeseries
+
+# If not found, install using Redis Stack or Redis modules
+```
+
+## Quick Start
+
+Here's a simple example of how to use Potoos:
+
 ```python
 from redis import Redis
-from potoos.client import PotoosClient, TimeSeriesConfig, AnomalyDetectionConfig
+from potoos.client import PotoosClient
+from potoos.models.config import TimeSeriesConfig, AnomalyDetectionConfig
 
+# Connect to Redis
+redis_client = Redis(host='localhost', port=6379)
 
-# 1. Initialize Redis client
-redis_client = Redis(host='localhost', port=6379, db=0)
+# Initialize Potoos client with default configurations
+client = PotoosClient(redis_client)
 
-# 2. Create configuration objects
-ts_config = TimeSeriesConfig(
-    start_time='-1h',          # Get data from the last hour
-    aggregation_type='avg',    # Average values
-    time_bucket=60000          # Aggregate by minute (60,000 ms)
-)
-
-anomaly_config = AnomalyDetectionConfig(
-    algorithm='derivative',    # Use derivative algorithm (good for trends)
-    threshold=0.85,            # Higher threshold = fewer anomalies
-    use_multiple_algorithms=False
-)
-
-# 3. Initialize PotoosClient
+# Or with custom configurations
 client = PotoosClient(
     redis_client=redis_client,
-    default_ts_config=ts_config,
-    default_anomaly_config=anomaly_config
+    time_series_config=TimeSeriesConfig(reversed=False, count=1000),
+    anomaly_config=AnomalyDetectionConfig(algorithm_name='bitmap_detector')
 )
 
-# 4. Define a callback function to handle anomalies
-def handle_anomalies(results, metadata):
-    anomalies = [r for r in results if r.is_anomaly]
-    if anomalies:
-        print(f"Found {len(anomalies)} anomalies out of {len(results)} data points!")
-        print(f"Anomaly timestamps: {[a.timestamp for a in anomalies]}")
-        # Here you could send alerts, log to database, etc.
-    else:
-        print(f"No anomalies found among {len(results)} data points")
-    
-    print(f"Detection algorithm: {metadata['algorithm']}")
-    print(f"Time range analyzed: {metadata['time_range']['duration_ms']/60000:.1f} minutes")
+# Monitor a time series key for anomalies
+results = client.monitor('metrics:cpu:usage')
 
-# 5. Monitor a Redis time series key
-key = "system:cpu:usage"
-results, metadata = client.monitor(
-    key=key,
-    callback=handle_anomalies
+# Process the results
+if results:
+    print(f"Analysis complete. Found {results.meta_data.anomalies_found} anomalies")
+    print(f"Analyzed {results.meta_data.data_points_analyzed} data points")
+    
+    # Print information about each anomaly
+    for anomaly in results.anomalies:
+        print(f"Anomaly at {anomaly.exact_timestamp}")
+        print(f"Anomaly score: {anomaly.anomaly_score}")
+        
+    # Or access anomaly score in TimeSeries object
+    print(f"Anomaly scores: {results.scores}")
+
+    # Access time range analyzed
+    time_range = results.meta_data.time_range_analyzed
+    print(f"Time range analyzed: {time_range.start} to {time_range.end}")
+```
+
+## Configuration
+
+### Time Series Configuration
+
+```python
+from potoos.models.config import TimeSeriesConfig
+
+# Default values shown
+config = TimeSeriesConfig(
+    count=None,         # Maximum number of samples to return
+    aggregation=None,   # Aggregation type (e.g., 'avg', 'sum', 'min', 'max')
+    bucket_size=None,   # Time bucket for aggregation in milliseconds
+    filter_by=None,     # Filtering options for labels
+    align=None,         # Timestamp alignment control
+    start=None,         # Start timestamp
+    end=None,           # End timestamp
+    reversed=False      # Return results in reverse order when True
 )
 ```
+
+### Anomaly Detection Configuration
+
+```python
+from potoos.models.config import AnomalyDetectionConfig
+
+# Default values shown
+config = AnomalyDetectionConfig(
+    algorithm_name='bitmap_detector',  # Algorithm to use
+    score_threshold=None,              # Threshold for anomaly detection
+    score_percentile_threshold=None,   # Percentile threshold
+    algorithm_params={}                # Additional algorithm parameters
+)
+```
+
+## How It Works
+
+1. **Initialization**: PotoosClient connects to your Redis instance and verifies the TimeSeries module is available
+2. **Data Retrieval**: When monitoring, it fetches time series data according to your configuration
+3. **Anomaly Detection**: The retrieved data is analyzed using Luminol's algorithms
+4. **Results**: You receive detailed information about detected anomalies and analysis metadata

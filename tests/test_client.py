@@ -1,276 +1,270 @@
 import unittest
-from unittest.mock import Mock, patch, MagicMock
-from potoos.client import PotoosClient, TimeSeriesConfig, AnomalyDetectionConfig, AnomalyResult
+from unittest.mock import Mock, patch
+from redis.client import Redis
+from luminol.anomaly_detector import AnomalyDetector
+from luminol.modules.time_series import TimeSeries
+from luminol.modules.anomaly import Anomaly
+from potoos.client import PotoosClient
+from potoos.models.config import TimeSeriesConfig, AnomalyDetectionConfig
+from potoos.models.anomaly import DataPoint, AnomalyResult, MetaData, TimeRange
 
 
 class TestPotoosClient(unittest.TestCase):
-    """Test suite for PotoosClient's monitor function."""
-
     def setUp(self):
         """Set up test fixtures before each test method."""
-        # Create a mock Redis client
-        self.redis_client = Mock()
+        # Create mock Redis client
+        self.mock_redis = Mock(spec=Redis)
 
-        # Mock the module_list method to indicate RedisTimeSeries is available
-        self.redis_client.module_list.return_value = [
-            {"name": "timeseries", "ver": 10205}
+        # Mock the module_list method to return a list with the timeseries module
+        self.mock_redis.module_list.return_value = [{'name': 'timeseries'}]
+
+        # Mock the ts() method
+        self.mock_ts = Mock()
+        self.mock_redis.ts.return_value = self.mock_ts
+
+        # Default configurations
+        self.time_series_config = TimeSeriesConfig()
+        self.anomaly_config = AnomalyDetectionConfig()
+
+        # Create client with mocked dependencies
+        self.client = PotoosClient(
+            redis_client=self.mock_redis,
+            time_series_config=self.time_series_config,
+            anomaly_config=self.anomaly_config
+        )
+
+    # 1. Basic initialization tests
+    def test_init_with_defaults(self):
+        """Test client initialization with default configurations."""
+        # Reset the mock to clear previous calls
+        self.mock_redis.reset_mock()
+
+        client = PotoosClient(redis_client=self.mock_redis)
+
+        self.assertIsInstance(client.time_series_config, TimeSeriesConfig)
+        self.assertIsInstance(client.anomaly_config, AnomalyDetectionConfig)
+        self.mock_redis.module_list.assert_called_once()
+
+    def test_init_with_custom_configs(self):
+        """Test client initialization with custom configurations."""
+        custom_ts_config = TimeSeriesConfig(reversed=True)
+        custom_anomaly_config = AnomalyDetectionConfig(algorithm_name="derivative_algorithm")
+
+        client = PotoosClient(
+            redis_client=self.mock_redis,
+            time_series_config=custom_ts_config,
+            anomaly_config=custom_anomaly_config
+        )
+
+        self.assertEqual(client.time_series_config, custom_ts_config)
+        self.assertEqual(client.anomaly_config, custom_anomaly_config)
+
+    # 2. Redis module checking tests
+    def test_module_check_success(self):
+        """Test successful module check when timeseries module is present."""
+        # Already set up in setUp method, just verify it works
+        client = PotoosClient(redis_client=self.mock_redis)
+        # No exception should be raised
+
+    def test_module_check_failure(self):
+        """Test module check failure when timeseries module is missing."""
+        self.mock_redis.module_list.return_value = [{'name': 'other_module'}]
+
+        with self.assertRaises(RuntimeError):
+            PotoosClient(redis_client=self.mock_redis)
+
+    # 3. Time series data retrieval tests
+    def test_get_time_series_forward(self):
+        """Test retrieving time series data in forward order."""
+        key = "test_key"
+        self.mock_ts.range.return_value = ([1000, 2000, 3000], [10.0, 20.0, 30.0])
+
+        result = self.client._get_time_series(key)
+
+        self.mock_ts.range.assert_called_once_with(key=key, **self.time_series_config.__dict__)
+        expected = [
+            DataPoint(timestamp=1000, value=10.0),
+            DataPoint(timestamp=2000, value=20.0),
+            DataPoint(timestamp=3000, value=30.0)
+        ]
+        self.assertEqual(result, expected)
+
+    def test_get_time_series_reversed(self):
+        """Test retrieving time series data in reverse order."""
+        key = "test_key"
+        reversed_config = TimeSeriesConfig(reversed=True)
+        self.mock_ts.revrange.return_value = ([3000, 2000, 1000], [30.0, 20.0, 10.0])
+
+        result = self.client._get_time_series(key, config=reversed_config)
+
+        self.mock_ts.revrange.assert_called_once_with(key=key, **reversed_config.__dict__)
+        expected = [
+            DataPoint(timestamp=3000, value=30.0),
+            DataPoint(timestamp=2000, value=20.0),
+            DataPoint(timestamp=1000, value=10.0)
+        ]
+        self.assertEqual(result, expected)
+
+    def test_get_time_series_empty(self):
+        """Test retrieving time series data when no data is available."""
+        key = "empty_key"
+        self.mock_ts.range.return_value = ([], [])
+
+        result = self.client._get_time_series(key)
+
+        self.assertEqual(result, [])
+
+    def test_get_time_series_with_different_key_types(self):
+        """Test retrieving time series with different key types (str, bytes, memoryview)."""
+        # String key
+        str_key = "string_key"
+        self.mock_ts.range.return_value = ([1000], [10.0])
+        self.client._get_time_series(str_key)
+        self.mock_ts.range.assert_called_with(key=str_key, **self.time_series_config.__dict__)
+
+        # Bytes key
+        bytes_key = b"bytes_key"
+        self.mock_ts.range.return_value = ([1000], [10.0])
+        self.client._get_time_series(bytes_key)
+        self.mock_ts.range.assert_called_with(key=bytes_key, **self.time_series_config.__dict__)
+
+    # 4. Anomaly detection tests
+    def test_detect_anomalies_insufficient_data(self):
+        """Test anomaly detection with insufficient data points."""
+        data_points = [
+            DataPoint(timestamp=1000, value=10.0),
+            DataPoint(timestamp=2000, value=20.0),
+            DataPoint(timestamp=3000, value=30.0)
+        ]  # Only 3 data points, need at least 4
+
+        with self.assertRaises(ValueError):
+            self.client._detect_anomalies(data_points)
+
+    def test_detect_anomalies_basic(self):
+        """Test basic anomaly detection functionality."""
+        # Sample data points
+        data_points = [
+            DataPoint(timestamp=1000, value=10.0),
+            DataPoint(timestamp=2000, value=20.0),
+            DataPoint(timestamp=3000, value=30.0),
+            DataPoint(timestamp=4000, value=100.0)  # Potential anomaly
         ]
 
-        # Create a mock for the Redis time series functionality
-        self.ts_mock = Mock()
-        self.redis_client.ts.return_value = self.ts_mock
+        # Create a proper mock of TimeSeries for the scores
+        mock_scores = Mock(spec=TimeSeries)
+        # Configure the TimeSeries mock to have the necessary properties
+        mock_scores.timestamps = [1000, 2000, 3000, 4000]
+        mock_scores.values = [0.1, 0.2, 0.3, 0.9]
 
-        # Sample time series data (timestamps and values)
-        self.sample_ts_data = [
-            (1614556800000, 10.5),  # Normal data
-            (1614557700000, 11.2),  # Normal data
-            (1614558600000, 10.8),  # Normal data
-            (1614559500000, 12.1),  # Normal data
-            (1614560400000, 11.5),  # Normal data
-            (1614561300000, 32.7),  # Anomaly
-            (1614562200000, 11.9),  # Normal data
-            (1614563100000, 12.3),  # Normal data
-            (1614564000000, 11.7),  # Normal data
-            (1614564900000, 12.0),  # Normal data
+        # Create a mock anomaly
+        mock_anomaly = Mock(spec=Anomaly)
+
+        # Use context manager to patch only the specific methods
+        with patch.object(AnomalyDetector, 'get_anomalies', return_value=[mock_anomaly]), \
+                patch.object(AnomalyDetector, 'get_all_scores', return_value=mock_scores):
+            # Call the method
+            result = self.client._detect_anomalies(data_points)
+
+            # Check result structure
+            self.assertEqual(len(result.anomalies), 1)
+            self.assertEqual(result.anomalies[0], mock_anomaly)
+            self.assertEqual(result.scores, mock_scores)
+            self.assertEqual(result.meta_data.algorithm, self.anomaly_config.algorithm_name)
+            self.assertEqual(result.meta_data.data_points_analyzed, 4)
+            self.assertEqual(result.meta_data.anomalies_found, 1)
+            self.assertEqual(result.meta_data.time_range_analyzed.start, 1000)
+            self.assertEqual(result.meta_data.time_range_analyzed.end, 4000)
+            self.assertEqual(result.meta_data.time_range_analyzed.duration, 3000)
+
+    def test_detect_anomalies_no_anomalies(self):
+        """Test anomaly detection when no anomalies are found."""
+        data_points = [
+            DataPoint(timestamp=1000, value=10.0),
+            DataPoint(timestamp=2000, value=20.0),
+            DataPoint(timestamp=3000, value=30.0),
+            DataPoint(timestamp=4000, value=40.0)
         ]
 
-        # Set up the mock to return our sample data
-        self.ts_mock.range.return_value = list(zip(*self.sample_ts_data))
-        self.ts_mock.revrange.return_value = list(zip(*reversed(self.sample_ts_data)))
+        # Create a proper mock of TimeSeries for the scores
+        mock_scores = Mock(spec=TimeSeries)
+        # Configure the TimeSeries mock to have the necessary properties
+        mock_scores.timestamps = [1000, 2000, 3000, 4000]
+        mock_scores.values = [0.1, 0.1, 0.1, 0.1]
 
-        # Initialize the client with default configs
-        self.client = PotoosClient(self.redis_client)
+        # Use a context manager to patch the AnomalyDetector methods
+        with patch.object(AnomalyDetector, 'get_anomalies', return_value=[]), \
+                patch.object(AnomalyDetector, 'get_all_scores', return_value=mock_scores):
+            # Call the method
+            result = self.client._detect_anomalies(data_points)
 
-        # Create a spy for detect_anomalies method
-        self.original_detect_anomalies = self.client.detect_anomalies
-        self.client.detect_anomalies = MagicMock(wraps=self.original_detect_anomalies)
+            # Check expected results
+            self.assertEqual(len(result.anomalies), 0)
+            self.assertEqual(result.scores, mock_scores)
+            self.assertEqual(result.meta_data.anomalies_found, 0)
 
-        # Sample anomaly results for mocking
-        self.sample_anomaly_results = [
-            AnomalyResult(timestamp=ts, value=val,
-                          anomaly_score=0.9 if val > 30 else 0.1,
-                          is_anomaly=val > 30)
-            for ts, val in self.sample_ts_data
-        ]
-
-        # Sample metadata for mocking
-        self.sample_metadata = {
-            'algorithm': 'derivative',
-            'threshold': 0.8,
-            'data_points_analyzed': len(self.sample_ts_data),
-            'anomalies_found': 1,
-            'max_score': 0.9,
-        }
-
-    def test_monitor_basic_functionality(self):
-        """Test that monitor correctly fetches data and detects anomalies."""
-        # Set up the detect_anomalies mock to return our sample results
-        self.client.detect_anomalies.return_value = (self.sample_anomaly_results, self.sample_metadata)
-
-        # Call the monitor function
-        results, metadata = self.client.monitor(key='test:key')
-
-        # Assert that the ts.range method was called correctly
-        self.ts_mock.range.assert_called_once()
-
-        # Assert that detect_anomalies was called with the correct data
-        self.client.detect_anomalies.assert_called_once()
-
-        # Verify the results
-        self.assertEqual(len(results), len(self.sample_anomaly_results))
-        self.assertEqual(metadata['anomalies_found'], 1)
-
-        # Check that the anomaly was detected at the correct timestamp
-        anomalies = [r for r in results if r.is_anomaly]
-        self.assertEqual(len(anomalies), 1)
-        self.assertEqual(anomalies[0].timestamp, 1614561300000)
-        self.assertEqual(anomalies[0].value, 32.7)
-
-    def test_monitor_with_custom_configs(self):
-        """Test monitor with custom time series and anomaly configurations."""
-        # Create custom configs
-        ts_config = TimeSeriesConfig(
-            start_time='-1h',
-            end_time='+',
-            count=50,
-            aggregation_type='avg',
-            time_bucket=60000
-        )
-
-        anomaly_config = AnomalyDetectionConfig(
-            algorithm='exp_avg_detector',
-            threshold=0.75
-        )
-
-        # Set up the detect_anomalies mock
-        self.client.detect_anomalies.return_value = (self.sample_anomaly_results, self.sample_metadata)
-
-        # Call monitor with custom configs
-        self.client.monitor(
-            key='test:key',
-            ts_config=ts_config,
-            anomaly_config=anomaly_config
-        )
-
-        # Assert that the ts.range method was called with the correct parameters
-        self.ts_mock.range.assert_called_once_with(
-            key='test:key',
-            from_time='-1h',
-            to_time='+',
-            aggregation_type='avg',
-            time_bucket=60000,
-            count=50
-        )
-
-        # Get the arguments passed to detect_anomalies
-        _, kwargs = self.client.detect_anomalies.call_args
-
-        # Verify the anomaly config was used
-        self.assertEqual(kwargs.get('algorithm'), 'exp_avg_detector')
-        self.assertEqual(kwargs.get('threshold'), 0.75)
-
-    def test_monitor_with_callback(self):
-        """Test that the callback function is called with the correct results."""
-        # Create a mock callback function
-        callback_mock = Mock()
-
-        # Set up the detect_anomalies mock
-        self.client.detect_anomalies.return_value = (self.sample_anomaly_results, self.sample_metadata)
-
-        # Call monitor with the callback
-        self.client.monitor(key='test:key', callback=callback_mock)
-
-        # Assert that the callback was called with the correct arguments
-        callback_mock.assert_called_once_with(self.sample_anomaly_results, self.sample_metadata)
-
-    def test_monitor_with_multiple_algorithms(self):
-        """Test monitor when using multiple anomaly detection algorithms."""
-        # Create an anomaly config with multiple algorithms
-        anomaly_config = AnomalyDetectionConfig(
-            use_multiple_algorithms=True,
-            algorithms=['derivative', 'exp_avg_detector'],
-            algorithm='derivative'  # Primary algorithm
-        )
-
-        # Create a mock for detect_anomalies_multiple_algorithms
-        self.client.detect_anomalies_multiple_algorithms = Mock()
-
-        # Set up the mock to return a dictionary of results
-        multi_algo_results = {
-            'derivative': (self.sample_anomaly_results, self.sample_metadata),
-            'exp_avg_detector': (
-                [AnomalyResult(timestamp=ts, value=val, anomaly_score=0.8 if val > 30 else 0.2, is_anomaly=val > 30)
-                 for ts, val in self.sample_ts_data],
-                {'algorithm': 'exp_avg_detector', 'anomalies_found': 1}
-            )
-        }
-        self.client.detect_anomalies_multiple_algorithms.return_value = multi_algo_results
-
-        # Call monitor with the config using multiple algorithms
-        results, metadata = self.client.monitor(
-            key='test:key',
-            anomaly_config=anomaly_config
-        )
-
-        # Assert that detect_anomalies_multiple_algorithms was called
-        self.client.detect_anomalies_multiple_algorithms.assert_called_once()
-
-        # Verify that we got the results from the primary algorithm
-        self.assertEqual(results, self.sample_anomaly_results)
-        self.assertEqual(metadata['algorithm'], 'derivative')
-
-        # Verify that the multi-algorithm results are in the metadata
-        self.assertIn('multi_algorithm_results', metadata)
-        self.assertEqual(metadata['multi_algorithm_results'], multi_algo_results)
-
-    def test_monitor_with_stream_detection(self):
-        """Test monitor when using stream-based anomaly detection."""
-        # Create an anomaly config with stream detection
-        anomaly_config = AnomalyDetectionConfig(
-            use_stream_detection=True,
-            window_size=5,
-            step_size=1,
-            algorithm='derivative'
-        )
-
-        # Create a mock for detect_and_analyze_stream
-        self.client.detect_and_analyze_stream = Mock()
-        self.client.detect_and_analyze_stream.return_value = self.sample_anomaly_results
-
-        # Call monitor with the stream detection config
-        results, metadata = self.client.monitor(
-            key='test:key',
-            anomaly_config=anomaly_config
-        )
-
-        # Assert that detect_and_analyze_stream was called
-        self.client.detect_and_analyze_stream.assert_called_once()
-
-        # Verify the results
-        self.assertEqual(results, self.sample_anomaly_results)
-        self.assertEqual(metadata['detection_method'], 'stream')
-        self.assertEqual(metadata['window_size'], 5)
-        self.assertEqual(metadata['step_size'], 1)
-
+    # 5. End-to-end monitoring tests
     def test_monitor_with_no_data(self):
-        """Test monitor behavior when no data is returned from Redis."""
-        # Set up the ts.range mock to return empty lists
-        self.ts_mock.range.return_value = ([], [])
+        """Test monitor method when no data is available."""
+        key = "no_data_key"
+        self.mock_ts.range.return_value = ([], [])
 
-        # Call monitor
-        results, metadata = self.client.monitor(key='test:key')
+        result = self.client.monitor(key)
 
-        # Verify that we got empty results and an error in metadata
-        self.assertEqual(results, [])
-        self.assertIn('error', metadata)
-        self.assertEqual(metadata['error'], 'No data points retrieved')
+        self.assertIsNone(result)
+        self.mock_ts.range.assert_called_once_with(key=key, **self.time_series_config.__dict__)
 
-        # Assert that detect_anomalies was not called
-        self.client.detect_anomalies.assert_not_called()
+    def test_monitor_basic(self):
+        """Test basic monitoring functionality."""
+        key = "test_key"
+        self.mock_ts.range.return_value = ([1000, 2000, 3000, 4000], [10.0, 20.0, 30.0, 40.0])
 
-    def test_monitor_with_real_data_conversion(self):
-        """Test that monitor correctly converts Redis data to DataPoint objects."""
-        # Reset the detect_anomalies mock to use the actual implementation
-        self.client.detect_anomalies = self.original_detect_anomalies
+        # Mock the anomaly detection
+        with patch.object(self.client, '_detect_anomalies') as mock_detect:
+            mock_result = Mock(spec=AnomalyResult)
+            mock_detect.return_value = mock_result
 
-        # Create a patch for AnomalyDetector to control its behavior
-        with patch('luminol.anomaly_detector.AnomalyDetector') as mock_detector_class:
-            # Create a mock detector instance
-            mock_detector = Mock()
-            mock_detector_class.return_value = mock_detector
+            result = self.client.monitor(key)
 
-            # Set up the mock detector to return sample anomalies and scores
-            mock_detector.get_anomalies.return_value = []
-            mock_detector.get_all_scores.return_value = {
-                ts / 1000: 0.9 if val > 30 else 0.1
-                for ts, val in self.sample_ts_data
-            }
+            # Verify the calls
+            self.mock_ts.range.assert_called_once_with(key=key, **self.time_series_config.__dict__)
+            mock_detect.assert_called_once()
 
-            # Call monitor
-            results, metadata = self.client.monitor(key='test:key')
+            # Check data points passed to detect_anomalies
+            data_points_arg = mock_detect.call_args[1]['data_points']
+            self.assertEqual(len(data_points_arg), 4)
 
-            # Verify that TimeSeries was created with the correct data
-            # This is a bit tricky to test directly, so we'll check that AnomalyDetector was initialized
-            mock_detector_class.assert_called_once()
+            # Verify result
+            self.assertEqual(result, mock_result)
 
-            # Verify that the results contain the expected number of points
-            self.assertEqual(len(results), len(self.sample_ts_data))
+    def test_monitor_with_custom_ts_config(self):
+        """Test monitoring with a custom time series configuration."""
+        key = "test_key"
+        custom_config = TimeSeriesConfig(reversed=True)
 
-            # Check that the anomaly was detected at the correct timestamp
-            anomalies = [r for r in results if r.is_anomaly]
-            self.assertEqual(len(anomalies), 1)
-            self.assertEqual(anomalies[0].value, 32.7)
+        self.mock_ts.revrange.return_value = ([4000, 3000, 2000, 1000], [40.0, 30.0, 20.0, 10.0])
 
-    def test_monitor_handles_exceptions(self):
-        """Test that monitor properly handles exceptions during data processing."""
-        # Make ts.range raise an exception
-        self.ts_mock.range.side_effect = Exception("Redis connection error")
+        # Mock the anomaly detection
+        with patch.object(self.client, '_detect_anomalies') as mock_detect:
+            mock_result = Mock(spec=AnomalyResult)
+            mock_detect.return_value = mock_result
 
-        # Ensure monitor handles this gracefully
-        with self.assertRaises(Exception) as context:
-            self.client.monitor(key='test:key')
+            result = self.client.monitor(key, ts_config=custom_config)
 
-        self.assertIn("Redis connection error", str(context.exception))
+            # Verify the calls
+            self.mock_ts.revrange.assert_called_once_with(key=key, **custom_config.__dict__)
+            self.assertEqual(result, mock_result)
+
+    def test_monitor_error_propagation(self):
+        """Test that monitor properly propagates errors from underlying methods."""
+        key = "test_key"
+        self.mock_ts.range.return_value = ([1000, 2000, 3000, 4000], [10.0, 20.0, 30.0, 40.0])
+
+        # Mock the anomaly detection to raise an exception
+        with patch.object(self.client, '_detect_anomalies') as mock_detect:
+            mock_detect.side_effect = Exception("Test error")
+
+            with self.assertRaises(Exception):
+                self.client.monitor(key)
 
 
 if __name__ == '__main__':

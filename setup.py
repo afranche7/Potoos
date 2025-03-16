@@ -5,12 +5,9 @@ setup(
     version='0.1',
     packages=find_packages(),
     install_requires=[
-        'async-timeout == 5.0.1',
-         'future == 0.16.0',
-         'luminol == 0.4',
-         'numpy == 2.2.3',
-         'redis == 5.2.1',
-         'scipy == 1.15.2'
+        'luminol == 0.4',
+        'redis == 5.2.1',
+        'numpy == 1.22.4',
     ],
     tests_require=[
         'unittest'
