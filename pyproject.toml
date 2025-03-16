@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "potoos"
+version = "0.1.0"
+description = "Time series anomaly detection using Redis TimeSeries and Luminol"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Alexis Franche", email = "alexis199807@live.ca"}
+]
+maintainers = [
+    {name = "Alexis Franche", email = "alexis199807@live.ca"}
+]
+keywords = ["redis", "timeseries", "redistimeseries", "anomaly-detection", "monitoring", "luminol"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "redis>=5.2.1",
+    "luminol>=0.4",
+    "numpy<=1.22.4",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/afranche7/Potoos"
+
+[tool.setuptools]
+packages = ["potoos", "potoos.models"]
+
+[tool.setuptools.package-data]
+potoos = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+disallow_incomplete_defs = false

@@ -127,3 +127,7 @@ config = AnomalyDetectionConfig(
 2. **Data Retrieval**: When monitoring, it fetches time series data according to your configuration
 3. **Anomaly Detection**: The retrieved data is analyzed using Luminol's algorithms
 4. **Results**: You receive detailed information about detected anomalies and analysis metadata
+
+## Note on Dependencies
+
+Potoos requires NumPy 1.22.4 or earlier due to Luminol's dependency on the `numpy.asscalar()` function, which was removed in later versions of NumPy.
