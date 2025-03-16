@@ -29,7 +29,7 @@ This makes it ideal for monitoring metrics, detecting unusual patterns, and iden
   - redis-py
   - luminol
 
-## Installation (Soon !)
+## Installation
 
 ```bash
 pip install potoos
